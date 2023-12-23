@@ -31,7 +31,6 @@ space_name_to_id_map = {i.getName(): i.getSpaceID() for i in addr_fact.getAllAdd
 space_id_to_name_map = {v: k for k, v in space_name_to_id_map.items()}
 
 
-
 class VarNodePCodeAccess:
     def __init__(self, offset, datatype=None):
         self.offset = offset
@@ -39,75 +38,145 @@ class VarNodePCodeAccess:
 
     def str_access(self):
         if self.datatype is None:
-            return " + %d" % offset
+            return " + %d" % self.offset
         base_dt = DataTypeUtils.getBaseDataType(self.datatype)
-        component = base_dt.getComponentAt(self.offset)
-        return "->%s" % component.fieldName
+        if hasattr(base_dt, "getComponentAt"):
+            component = base_dt.getComponentAt(self.offset)
+            return "->%s" % component.fieldName
+        return " + %d" % self.offset
 
 
-class CompositeAccessTracer:
-    def __init__(self, varnode):
-        self.vn = varnode
-        self.has_high = self.vn.high is not None
-        self.forward = False
+class CompositeFieldAccessDescriptor:
+    """
+    A class for describing the path to a field in a composite type.
+    """
+    def __init__(self, datatype=None):
+        self.datatype = datatype
+        self.access_list = []
+        self.access_vns = []
 
-    def trace_forward(self):
-        """
-        Trace forward from the varnode to all of the accesses
-        """
-        self.forward = True
-        pass
 
-    def trace_backward(self):
-        curr_vn = self.vn
-        collected_accesses = []
-        while True:
-            defining_op = curr_vn.getDef()
-            if defining_op is None:
-                dt = None
-                if curr_vn.high is not None:
-                    dt = curr_vn.high.dataType
-                access = VarNodePCodeAccess(0, datatype=dt)
-                collected_accesses.append(access)
-                # TODO: fix accessor here
-                # followed all the way back to source unless there is
-                # an undefined type or uninitialized access or
-                # it is just a parameter
+def trace_composite_access_forward(vn):
+    """
+    Trace forward from the varnode to all of the accesses
+    """
+    pass
+
+def trace_composite_access_backward(vn):
+    """
+    This operates like a backward slice, except it will not follow
+    all paths in the case of MULTIEQUAL (phi),
+
+    similar operations can be found in
+    FillOutStructureCmd.java
+    """
+    curr_vn = vn
+    const_space_id = space_name_to_id_map['const']
+    cfad = CompositeFieldAccessDescriptor()
+    while True:
+        cfad.access_vns.append(curr_vn)
+        defining_op = curr_vn.getDef()
+        if defining_op is None:
+            # followed all the way back to source unless there is
+            # an undefined type or uninitialized access or
+            # it is just a parameter
+            break
+        opcode = defining_op.opcode
+        if opcode in [PcodeOpAST.CALL, PcodeOpAST.CALLIND]:
+            # vn is the output from a call or callind op,
+            # can't really do much with that
+            break
+
+        if opcode in [PcodeOpAST.COPY, PcodeOpAST.CAST]:
+            # NOTE: keeping this separate
+            curr_vn = defining_op.getInput(0)
+            continue
+        if opcode == PcodeOpAST.LOAD:
+            # TODO: handle deref
+            derefd_vn = defining_op.getInput(1)
+            curr_vn = derefd_vn
+            continue
+
+        if opcode in [PcodeOpAST.PTRSUB, PcodeOpAST.PTRADD]:
+            # ptrsub is for struct/union accesses
+            # ptradd is for array indexing
+            composite_vn = defining_op.getInput(0)
+            high_composite_vn = composite_vn.high
+            if high_composite_vn is None:
+                log.error("No high composite vn")
                 break
-            opcode = defining_op.opcode
-            if opcode in [PcodeOpAST.CALL, PcodeOpAST.CALLIND]:
-                # vn is the output from a call or callind op,
-                # can't really do much with that
-                break
-            if opcode in [PcodeOpAST.COPY, PcodeOpAST.CAST]:
-                curr_vn = defining_op.getInput(0)
-                continue
-            if opcode == PcodeOpAST.LOAD:
-                # TODO: handle deref
-                derefd_vn = defining_op.getInput(1)
-                curr_vn = derefd_vn
-                continue
-
-            if opcode in [PcodeOpAST.PTRSUB, PcodeOpAST.PTRADD]:
-                # ptrsub is for struct/union accesses
-                # ptradd is for array indexing
-                composite_vn = defining_op.getInput(0)
-                high_composite_vn = composite_vn.high
-                if high_composite_vn is None:
-                    log.error("No high composite vn")
-                    break
-                dt = high_composite_vn.dataType
-                offset_vn = defining_op.getInput(1)
-                if offset_vn.getSpace() != space_name_to_id_map['const']:
-                    raise Exception("")
+            dt = high_composite_vn.dataType
+            offset_vn = defining_op.getInput(1)
+            if offset_vn.getSpace() != const_space_id:
+                # This indicates that the op is a PTRADD.
+                # Substitute 0 as the offset for now
+                offset = 0
+            else:
                 offset = offset_vn.getOffset()
-                access = VarNodePCodeAccess(offset, datatype=dt)
-                collected_accesses.append(access)
-                curr_vn = composite_vn
-                continue
+            access = VarNodePCodeAccess(offset, datatype=dt)
+            cfad.access_list.append(access)
+            curr_vn = composite_vn
+            continue
+        if opcode == PcodeOpAST.MULTIEQUAL:
+            # ideally all sources lead to the same place,
+            # but for now just pick the first
+            curr_vn = defining_op.getInput(0)
+            continue
 
-            log.warning("Unhandled opcode")
-        return collected_accesses[::-1]
+        if opcode == PcodeOpAST.INDIRECT:
+            # TODO: This isn't really handled yet
+            curr_vn = defining_op.getInput(0)
+            log.warning("Reached an INDIRECT op")
+            continue
+
+        if opcode == PcodeOpAST.INT_ADD:
+            # TODO: determine if vn is constant
+            curr_vn = defining_op.getInput(0)
+            offset_vn = defining_op.getInput(1)
+            if offset_vn.getSpace() != const_space_id:
+                log.warning("Non constant Varnode encountered for an INT_ADD")
+                continue
+            offset = offset_vn.getOffset()
+            access = VarNodePCodeAccess(offset)
+            cfad.access_list.append(access)
+            continue
+
+        if opcode == PcodeOpAST.INT_SUB:
+            curr_vn = defining_op.getInput(0)
+            offset_vn = defining_op.getInput(1)
+            if offset_vn.getSpace() != const_space_id:
+                log.warning("Non constant Varnode encountered for an INT_SUB")
+                continue
+            offset = offset_vn.getOffset()
+            access = VarNodePCodeAccess(offset)
+            cfad.access_list.append(access)
+            continue
+
+        if opcode in [PcodeOpAST.INT_2COMP, PcodeOpAST.INT_NEGATE,
+                      PcodeOpAST.INT_XOR, PcodeOpAST.INT_AND,
+                      PcodeOpAST.INT_OR, PcodeOpAST.INT_LEFT,
+                      PcodeOpAST.INT_RIGHT, PcodeOpAST.INT_SRIGHT,
+                      PcodeOpAST.INT_MULT, PcodeOpAST.INT_DIV,
+                      PcodeOpAST.INT_REM, PcodeOpAST.INT_SDIV,
+                      PcodeOpAST.PIECE, PcodeOpAST.SUBPIECE,
+                      PcodeOpAST.INT_SREM, PcodeOpAST.BOOL_NEGATE,
+                      PcodeOpAST.BOOL_XOR, PcodeOpAST.BOOL_AND,
+                      PcodeOpAST.INT_SEXT, PcodeOpAST.INT_ZEXT,
+                      PcodeOpAST.BOOL_OR]:
+            curr_vn = defining_op.getInput(0)
+            continue
+
+
+        log.warning("Unhandled opcode %d", opcode)
+        raise Exception("Unhandled opcode")
+
+    dt = None
+    if curr_vn.high is not None:
+        dt = curr_vn.high.dataType
+    cfad.datatype = dt
+    cfad.access_vns = cfad.access_vns[::-1]
+    cfad.access_list = cfad.access_list[::-1]
+    return cfad
 
 
 class SliceUtils:
