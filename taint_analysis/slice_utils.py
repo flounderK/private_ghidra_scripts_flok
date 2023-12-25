@@ -11,6 +11,12 @@ from ghidra.program.database.data import PointerDB
 from ghidra.app.decompiler.component import DecompilerUtils
 from ghidra.program.model.data import PointerDataType
 from ghidra.app.plugin.core.datamgr.util import DataTypeUtils
+# for getDataTypeTraceBackward and getDataTypeTraceForward
+from ghidra.app.plugin.core.decompile.actions import FillOutStructureCmd
+from ghidra.program.model.data import MetaDataType
+# this class is pretty much all private, but has some functionality
+# that would be useful if it was accessible
+# from ghidra.app.plugin.core.decompile.actions import CreatePointerRelative
 
 from __main__ import *
 
@@ -32,9 +38,18 @@ space_id_to_name_map = {v: k for k, v in space_name_to_id_map.items()}
 
 
 class VarNodePCodeAccess:
-    def __init__(self, offset, datatype=None):
+    def __init__(self, offset, datatype=None, vn=None):
         self.offset = offset
         self.datatype = datatype
+        self.vn = vn
+
+    def get_byte_offset(self):
+        if self.datatype:
+            base_dt = DataTypeUtils.getBaseDataType(self.datatype)
+            byte_offset = base_dt.length * self.offset
+        else:
+            byte_offset = self.offset
+        return byte_offset
 
     def str_access(self):
         if self.datatype is None:
@@ -49,6 +64,10 @@ class VarNodePCodeAccess:
 class CompositeFieldAccessDescriptor:
     """
     A class for describing the path to a field in a composite type.
+    This class is meant to help with marking only specific fields of
+    composite types as tainted in taint analysis, which will make
+    taint propogation more accurate as it will allow functions like
+    memcpy to taint passed in `dest`
     """
     def __init__(self, datatype=None):
         self.datatype = datatype
@@ -113,7 +132,7 @@ def trace_composite_access_backward(vn):
                 offset = 0
             else:
                 offset = offset_vn.getOffset()
-            access = VarNodePCodeAccess(offset, datatype=dt)
+            access = VarNodePCodeAccess(offset, datatype=dt, vn=offset_vn)
             cfad.access_list.append(access)
             curr_vn = composite_vn
             continue
@@ -137,7 +156,7 @@ def trace_composite_access_backward(vn):
                 log.warning("Non constant Varnode encountered for an INT_ADD")
                 continue
             offset = offset_vn.getOffset()
-            access = VarNodePCodeAccess(offset)
+            access = VarNodePCodeAccess(offset, vn=offset_vn)
             cfad.access_list.append(access)
             continue
 
@@ -148,7 +167,7 @@ def trace_composite_access_backward(vn):
                 log.warning("Non constant Varnode encountered for an INT_SUB")
                 continue
             offset = offset_vn.getOffset()
-            access = VarNodePCodeAccess(offset)
+            access = VarNodePCodeAccess(offset, vn=offset_vn)
             cfad.access_list.append(access)
             continue
 
@@ -182,7 +201,8 @@ def trace_composite_access_backward(vn):
 class SliceUtils:
     """
     Utilities for getting slices, walking pointer chains, and associating
-    vanodes with types
+    vanodes with types.
+    ./Features/Decompiler/ghidra_scripts/classrecovery/DecompilerScriptUtils.java appears to already contain some of the functions used here, oops.
     """
 
     def __init__(self, program, decomp_timeout=60):
