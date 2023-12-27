@@ -1,6 +1,11 @@
 
 from .key_adjusted_offset_mapping import KeyAdjustedOffsetMapping
+import logging
 from __main__ import *
+
+log = logging.getLogger(__file__)
+log.addHandler(logging.StreamHandler())
+log.setLevel(logging.INFO)
 
 
 class MemHandleFactory:
@@ -14,6 +19,13 @@ class MemHandle:
     ANCHOR_TO_HANDLE_MAP = {}
 
     def __init__(self, ptr_size=4, varnode=None, parent=None, offset=0):
+        """
+        @ptr_size: pointer size for the current program
+        @varnode: optional anchor varnode that is a pointer to this MemHandle
+        @parent: parent MemHandle to reflect reads and writes added to this
+                 mem_handle on
+        @offset: offset within parent where this MemHandle is located
+        """
         self._base_offset = offset
         self._ptr_size = ptr_size
         self.parent = parent
@@ -21,26 +33,38 @@ class MemHandle:
         self._write_mask = bytearray(b'')
         self.vn_anchors = []
         self.vn_anchor_set = set()
+        self.store_ops = []
+        self.load_ops = []
         self._curr_min_size = 0
         self._needs_size_calc = True
+        self._needs_repr_resolve = True
+        self._repr = None
+        self.child_handles = []
+        self._child_handle_map = {}
         if parent is None:
-            self._ptr_map = KeyAdjustedOffsetMapping(offset)  # offset to MemHandle inst
-            self._read_map = KeyAdjustedOffsetMapping(offset)  # offset to size
-            self._write_map = KeyAdjustedOffsetMapping(offset)  # offset to size
+            self.ptr_map = KeyAdjustedOffsetMapping(offset)  # offset to MemHandle inst
+            self.read_map = KeyAdjustedOffsetMapping(offset)  # offset to size
+            self.write_map = KeyAdjustedOffsetMapping(offset)  # offset to size
+            self.read_op_map = KeyAdjustedOffsetMapping(offset)  # offset to opcodes
+            self.write_op_map = KeyAdjustedOffsetMapping(offset)  # offset to opcodes
         else:
-            self._ptr_map = self.parent._ptr_map.new_child(offset)  # offset to MemHandle inst
-            self._read_map = self.parent._read_map.new_child(offset)  # offset to size
-            self._write_map = self.parent._write_map.new_child(offset)  # offset to size
+            self.ptr_map = self.parent.ptr_map.new_child(offset)  # offset to MemHandle inst
+            self.read_map = self.parent.read_map.new_child(offset)  # offset to size
+            self.write_map = self.parent.write_map.new_child(offset)  # offset to size
+            self.read_op_map = self.parent.read_op_map.new_child(offset)  # offset to opcodes
+            self.write_op_map = self.parent.write_op_map.new_child(offset)  # offset to opcodes
 
         if varnode is not None:
             self.add_vn_anchor(varnode)
 
     def get_min_size(self):
-        if not self._needs_size_calc:
-            return self._curr_min_size
-        tmp_ptr_map = {k: self._ptr_size for k in self._ptr_map}
+        # caching size calc doesn't work for this because of the adjusted offset
+        # mappings
+        # if not self._needs_size_calc:
+        #     return self._curr_min_size
+        tmp_ptr_map = {k: self._ptr_size for k in self.ptr_map}
         curr_min_size = self._curr_min_size
-        for map_inst in [self._read_map, self._write_map, tmp_ptr_map]:
+        for map_inst in [self.read_map, self.write_map, tmp_ptr_map]:
             if len(map_inst) == 0:
                 continue
             offset_key = max(list(map_inst.keys()))
@@ -62,7 +86,7 @@ class MemHandle:
 
     def gen_read_mask(self, access_chr=b'\xff', save=True):
         read_mask = self._gen_access_mask(self._read_mask,
-                                          self._read_map,
+                                          self.read_map,
                                           access_chr)
         if save:
             # no copy in py 2
@@ -73,7 +97,7 @@ class MemHandle:
 
     def gen_write_mask(self, access_chr=b'\xff', save=True):
         write_mask = self._gen_access_mask(self._write_mask,
-                                           self._write_map,
+                                           self.write_map,
                                            access_chr)
         if save:
             # no copy in py 2
@@ -83,7 +107,7 @@ class MemHandle:
         return write_mask
 
     def gen_ptr_mask(self, access_chr=b'p'):
-        tmp_ptr_map = {k: self._ptr_size for k in self._ptr_map}
+        tmp_ptr_map = {k: self._ptr_size for k in self.ptr_map}
         ptr_mask = self._gen_access_mask(bytearray(b''),
                                          tmp_ptr_map,
                                          access_chr)
@@ -111,7 +135,7 @@ class MemHandle:
                 mask = mask.rjust(access_end_non_incl, b'\x00')
             access_marks = b''
             # pointer markings
-            # if offset in self._ptr_map:
+            # if offset in self.ptr_map:
             #     access_marks = access_marks.rjust(min(self._ptr_size,
             #                                       size),
             #                                       b'p')
@@ -120,23 +144,43 @@ class MemHandle:
             mask[access_start:access_end_non_incl] = access_marks
         return mask
 
-    def add_read_at(self, offset, size):
+    def add_read_at(self, offset, size, op=None):
         self._needs_size_calc = True
-        self._read_map[offset] = size
+        self.read_map[offset] = size
+        if op is None:
+            return
+        self.load_ops.append(op)
+        if self.read_op_map.get(offset) is None:
+            self.read_op_map[offset] = []
+        self.read_op_map[offset].append(op)
 
-    def add_write_at(self, offset, size):
+    def add_write_at(self, offset, size, op=None):
         self._needs_size_calc = True
-        self._write_map[offset] = size
+        self.write_map[offset] = size
+        if op is None:
+            return
+        self.store_ops.append(op)
+        if self.write_op_map.get(offset) is None:
+            self.write_op_map[offset] = []
+        self.write_op_map[offset].append(op)
 
     def add_ptr_at(self, offset, vn=None, mem_handle=None):
+        """
+        Create a new pointer at the given offset. If @mem_handle is not
+        provided, create a new MemHandle instance.
+        """
         self._needs_size_calc = True
         if mem_handle is None:
             mem_handle = MemHandle(self._ptr_size, vn)
-        self._ptr_map[offset] = mem_handle
+        self.ptr_map[offset] = mem_handle
         return mem_handle
 
     def get_or_add_ptr_at(self, offset, vn=None):
-        maybe_mem_handle = self._ptr_map.get(offset)
+        """
+        Get the MemHandle pointer at @offset if it exists, or
+        create a new one if it doesn't
+        """
+        maybe_mem_handle = self.ptr_map.get(offset)
         if maybe_mem_handle is not None:
             return maybe_mem_handle
         mem_handle = self.add_ptr_at(offset, vn)
@@ -145,21 +189,28 @@ class MemHandle:
     def add_vn_anchor(self, vn):
         if vn is None:
             return
+        self._needs_repr_resolve = True
         self.vn_anchors.append(vn)
         self.vn_anchor_set.add(vn)
         self.ANCHOR_TO_HANDLE_MAP[vn] = self
 
     def resolve_repr(self):
+        if self._repr is not None and self._needs_repr_resolve is False:
+            return self._repr
+        self._needs_repr_resolve = False
         initial_anchor = self.get_initial_anchor()
         if initial_anchor is None:
+            self._repr = str(self)
             return str(self)
         high_vn = initial_anchor.high
         if high_vn is None:
+            self._repr = str(self)
             return str(self)
         dt = high_vn.dataType
         name = high_vn.name
         min_size = self.get_min_size()
         repr_str = "MemHandle(%s %s, min_size=%d)" % (str(dt), str(name), min_size)
+        self._repr = repr_str
         return repr_str
 
     def new_ref_to_offset(self, offset, vn=None):
@@ -173,7 +224,15 @@ class MemHandle:
         This is meant to make passing a reference to an embedded struct or
         buffer reasonable to work with
         """
+        maybe_mem_handle = self._child_handle_map.get(offset)
+        if maybe_mem_handle is not None:
+            return maybe_mem_handle
         new_mem_handle = MemHandle(self._ptr_size, varnode=vn,
                                    parent=self, offset=offset)
+        self.child_handles.append(new_mem_handle)
+        self._child_handle_map[offset] = new_mem_handle
         return new_mem_handle
+
+    def __repr__(self):
+        return self.resolve_repr()
 

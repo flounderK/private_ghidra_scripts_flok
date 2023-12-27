@@ -99,7 +99,7 @@ class CompositeFieldAccessDescriptor:
         new_cfad.mem_handle = self.mem_handle
 
 
-def trace_composite_access_forward(vn):
+def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
     """
     Trace forward from the varnode to all of the accesses.
     a lot of the code here is directly from FillOutStructureCmd.java,
@@ -129,6 +129,7 @@ def trace_composite_access_forward(vn):
     def sanityCheck(offset, existingSize=0):
         # offsets shouldn't be negative
         if offset < 0:
+            log.error("Negative offset in sanityCheck")
             return False
         # do we have room in the structure
         # if offset < existingSize:
@@ -163,7 +164,7 @@ def trace_composite_access_forward(vn):
                 curr_vn = inputs[0]
                 offset_vn = inputs[1]
                 if not offset_vn.isConstant():
-                    log.warning("Non constant Varnode encountered for an INT_ADD or INT_SUB")
+                    # log.warning("Non constant Varnode encountered for an INT_ADD or INT_SUB")
                     continue
                 value = getSigned(offset_vn)
                 if opcode == PcodeOpAST.INT_ADD:
@@ -177,6 +178,8 @@ def trace_composite_access_forward(vn):
                     # likely "uninformed"
                     putOnList(output, offset, todoList,
                               doneList, current_ref.mem_handle)
+                else:
+                    log.error("sanityCheck failed for %s" % str(desc_op))
 
                 access = VarNodePCodeAccess(offset, vn=offset_vn)
                 cfad.add_access(access)
@@ -184,6 +187,7 @@ def trace_composite_access_forward(vn):
 
             if opcode == PcodeOpAST.PTRADD:
                 # PTRADD is for array indexing
+                log.error("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
                 dt = None
                 composite_vn = inputs[0]
                 high_composite_vn = composite_vn.high
@@ -198,16 +202,20 @@ def trace_composite_access_forward(vn):
                     newOff = current_ref.offset + \
                             (getSigned(inputs[1]) * inputs[2].getOffset())
                     if sanityCheck(newOff):
-                        putOnList(output, newOff, todoList,
-                                  doneList, current_ref.mem_handle)
+                        offset_mem_handle = current_ref.mem_handle.new_ref_to_offset(newOff, output)
+                        putOnList(output, 0, todoList,
+                                  doneList, offset_mem_handle)
                         access = VarNodePCodeAccess(newOff,
                                                     datatype=dt,
                                                     vn=inputs[1])
                         cfad.add_access(access)
                         # componentMap.setMinimumSize(newOff)
-                        # TODO: add mem_handle access
-                        current_ref.mem_handle.add_read_at(newOff,
-                                                           output.size)
+                        # FIXME: is mem_handle access here correct?
+                        # if ptr_loads_are_reads is True:
+                        #     current_ref.mem_handle.add_read_at(newOff,
+                        #                                        output.size, op=desc_op)
+                    else:
+                        log.error("sanity check failed for %s" % str(desc_op))
                     continue
 
                 offset_vn = inputs[1]
@@ -218,40 +226,55 @@ def trace_composite_access_forward(vn):
                 access = VarNodePCodeAccess(newOff,
                                             datatype=dt, vn=offset_vn)
                 cfad.add_access(access)
-                current_ref.mem_handle.add_read_at(newOff,
-                                                   output.size)
-                # TODO: add mem_handle access
-                putOnList(output, offset, todoList, doneList,
-                          current_ref.mem_handle)
+                # FIXME: is mem_handle access here correct?
+                # if ptr_loads_are_reads is True:
+                #     current_ref.mem_handle.add_read_at(newOff,
+                #                                        output.size, op=desc_op)
+
+                offset_mem_handle = current_ref.mem_handle.new_ref_to_offset(newOff, output)
+                putOnList(output, 0, todoList, doneList,
+                          offset_mem_handle)
                 continue
 
             if opcode == PcodeOpAST.PTRSUB:
                 # PTRSUB is for struct/union accesses
-
+                log.error("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
                 dt = None
                 composite_vn = inputs[0]
                 high_composite_vn = composite_vn.high
                 if high_composite_vn is not None:
                     dt = high_composite_vn.dataType
 
-                # old stuff from FillOutStructureCmd
-                if inputs[1].isConstant():
-                    subOff = current_ref.offset + getSigned(inputs[1])
-                    if sanityCheck(subOff):
-                        putOnList(output, subOff, todoList, doneList,
-                                  current_ref.mem_handle)
-                        # componentMap.setMinimumSize(subOff)
-                        access = VarNodePCodeAccess(subOff,
-                                                    datatype=dt,
-                                                    vn=inputs[1])
-                        cfad.add_access(access)
-                        current_ref.mem_handle.add_read_at(subOff,
-                                                           output.size)
-                        # TODO: add mem_handle access
+                if not inputs[1].isConstant():
+                    log.error("Non-const offset input to PTRSUB op")
                     continue
 
-                log.error("Non-const offset input to PTRSUB op")
+                # stuff from FillOutStructureCmd
+                subOff = current_ref.offset + getSigned(inputs[1])
+                if sanityCheck(subOff):
+                    # add a new item to the queue with a child mem handle so that
+                    # any LOADs or STOREs can be reflected correctly on this
+                    # MemHandle
+                    offset_mem_handle = current_ref.mem_handle.new_ref_to_offset(subOff, output)
+                    putOnList(output, 0, todoList, doneList,
+                              offset_mem_handle)
+                    # putOnList(output, subOff, todoList, doneList,
+                    #           current_ref.mem_handle)
+                    # componentMap.setMinimumSize(subOff)
+                    access = VarNodePCodeAccess(subOff,
+                                                datatype=dt,
+                                                vn=inputs[1])
+                    cfad.add_access(access)
+                    # FIXME: is mem_handle access here correct?
+                    # likely no, mem_handle read here is not a good assumption
+                    # if ptr_loads_are_reads is True:
+                    #     current_ref.mem_handle.add_read_at(subOff,
+                    #                                        output.size,
+                    #                                        op=desc_op)
+                else:
+                    log.error("sanityCheck failed for %s" % str(desc_op))
                 continue
+
 
             if opcode == PcodeOpAST.SEGMENTOP:
                 # treat segment op as if it were a cast to complete
@@ -264,28 +287,33 @@ def trace_composite_access_forward(vn):
                 continue
 
             if opcode == PcodeOpAST.LOAD:
-                # read_vn = output
-                # current_ref.mem_handle.add_read_at(current_ref.offset,
-                #                        read_vn.length)
-
+                log.error("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
                 # want a mem handle that is at offset
                 # current_ref.offset from the current handle,
                 outDt = FillOutStructureCmd.getDataTypeTraceForward(output)
 
+                # if the type can't be resolved we know at the very least that
+                # this is performing a read
+                if outDt is None:
+                    current_ref.mem_handle.add_read_at(current_ref.offset, output.size, op=desc_op)
+                    continue
+
                 # if the type is just a normal c type e.g. uint, it is just a
                 # read of that value
                 if outDt is not None and not isinstance(outDt, PointerDataType):
-                    current_ref.mem_handle.add_read_at(current_ref.offset, outDt.length)
+                    current_ref.mem_handle.add_read_at(current_ref.offset, outDt.length, op=desc_op)
                     continue
-                # dt = outDt.dataType
-                # if dt is not None and not isinstance(dt, PointerDataType):
-                #     current_ref.mem_handle.add_read_at(current_ref.offset, dt.length)
-                #     continue
+
+                # if ptr_loads_are_reads is True:
+                current_ref.mem_handle.add_read_at(current_ref.offset,
+                                                   output.size, op=desc_op)
 
                 maybe_new_mem_handle = current_ref.mem_handle.get_or_add_ptr_at(current_ref.offset, output)
-                # FIXME: size of read looks like it is wrong
-                maybe_new_mem_handle.add_read_at(0,
-                                                 output.size)
+                # FIXME: This read might be erronious. it seems like doing it on
+                # FIXME: this LOAD would be adding the read at least one op too
+                # FIXME: early
+                # maybe_new_mem_handle.add_read_at(0,
+                #                                  output.size, op=desc_op)
                 # unlike a STORE op, a LOAD op could be a dereference
                 # in a chain of pointers, so try to continue processing
                 # to try to resolve the full chain
@@ -300,23 +328,23 @@ def trace_composite_access_forward(vn):
                 continue
 
             if opcode == PcodeOpAST.STORE:
+                log.error("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
                 # we only care about this store op if the pointer is
                 # related to the current struct/slice, not the value
                 # being written
                 if desc_op.getSlot(current_ref.varnode) != 1:
                     continue
-                # TODO: this might not be adding the write to the
-                # TODO: correct mem_handle
 
-                # FIXME: do we want to differentiate between writes
-                # FIXME: to this structure vs writes from this
-                # FIXME: structure?
+                outDt = FillOutStructureCmd.getDataTypeTraceBackward(inputs[2])
 
-                # want a mem handle that is at offset
-                # current_ref.offset from the current handle,
-                maybe_new_mem_handle = current_ref.mem_handle.get_or_add_ptr_at(current_ref.offset, current_ref.varnode)
-                maybe_new_mem_handle.add_write_at(0,
-                                                  inputs[2].size)
+                # if the type can't be resolved, record it as a write with the
+                # best size that we can estimate
+                if outDt is None:
+                    current_ref.mem_handle.add_write_at(current_ref.offset, inputs[2].size, op=desc_op)
+                    continue
+
+                current_ref.mem_handle.add_write_at(current_ref.offset, outDt.length, op=desc_op)
+
                 # NOTE: original code did a little bit more here
                 # outDt = getDataTypeTraceBackward(inputs[2]);
                 # componentMap.addDataType(currentRef.offset, outDt);
@@ -332,6 +360,7 @@ def trace_composite_access_forward(vn):
                 # if the input was an anchor vn, the output will be too
                 # and should be treated as if it is the same vn
                 if current_ref.mem_handle.is_anchor(inputs[0]):
+                    # FIXME: shouldn't this be an output varnode
                     current_ref.mem_handle.add_vn_anchor(current_ref.varnode)
                 continue
 
