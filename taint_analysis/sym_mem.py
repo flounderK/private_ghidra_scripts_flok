@@ -33,8 +33,6 @@ class MemHandle:
         self._write_mask = bytearray(b'')
         self.vn_anchors = []
         self.vn_anchor_set = set()
-        self.store_ops = []
-        self.load_ops = []
         self._curr_min_size = 0
         self._needs_size_calc = True
         self._needs_repr_resolve = True
@@ -47,12 +45,21 @@ class MemHandle:
             self.write_map = KeyAdjustedOffsetMapping(offset)  # offset to size
             self.read_op_map = KeyAdjustedOffsetMapping(offset)  # offset to opcodes
             self.write_op_map = KeyAdjustedOffsetMapping(offset)  # offset to opcodes
+            self.read_array_map = KeyAdjustedOffsetMapping(offset)  # offset to elem size
+            self.read_array_op_map = KeyAdjustedOffsetMapping(offset)  # offset to opcodes
+            # this may be excessive...
+            self.const_index_read_array_map = KeyAdjustedOffsetMapping(offset)  # offset to elem size
+            self.const_index_read_array_op_map = KeyAdjustedOffsetMapping(offset)  # offset to opcodes
         else:
             self.ptr_map = self.parent.ptr_map.new_child(offset)  # offset to MemHandle inst
             self.read_map = self.parent.read_map.new_child(offset)  # offset to size
             self.write_map = self.parent.write_map.new_child(offset)  # offset to size
             self.read_op_map = self.parent.read_op_map.new_child(offset)  # offset to opcodes
             self.write_op_map = self.parent.write_op_map.new_child(offset)  # offset to opcodes
+            self.read_array_map = self.parent.read_array_map.new_child(offset)  # offset to elem size
+            self.read_array_op_map = self.parent.read_array_op_map.new_child(offset)  # offset to opcodes
+            self.const_index_read_array_map = self.parent.const_index_read_array_map.new_child(offset)  # offset to elem size
+            self.const_index_read_array_op_map = self.parent.const_index_read_array_op_map.new_child(offset)  # offset to opcodes
 
         if varnode is not None:
             self.add_vn_anchor(varnode)
@@ -134,11 +141,6 @@ class MemHandle:
                 diff = access_end_non_incl - mask_len
                 mask = mask.rjust(access_end_non_incl, b'\x00')
             access_marks = b''
-            # pointer markings
-            # if offset in self.ptr_map:
-            #     access_marks = access_marks.rjust(min(self._ptr_size,
-            #                                       size),
-            #                                       b'p')
             access_marks = access_marks.rjust(size, access_chr)
             # __setattribute__
             mask[access_start:access_end_non_incl] = access_marks
@@ -149,7 +151,6 @@ class MemHandle:
         self.read_map[offset] = size
         if op is None:
             return
-        self.load_ops.append(op)
         if self.read_op_map.get(offset) is None:
             self.read_op_map[offset] = []
         self.read_op_map[offset].append(op)
@@ -159,7 +160,6 @@ class MemHandle:
         self.write_map[offset] = size
         if op is None:
             return
-        self.store_ops.append(op)
         if self.write_op_map.get(offset) is None:
             self.write_op_map[offset] = []
         self.write_op_map[offset].append(op)
@@ -174,6 +174,25 @@ class MemHandle:
             mem_handle = MemHandle(self._ptr_size, vn)
         self.ptr_map[offset] = mem_handle
         return mem_handle
+
+    def add_array_read_at(self, offset, size, op=None, const_index=False):
+        """
+        Similar to a normal read, but indicates that an access to the specified
+        offset is being treated like an array access (PTRADD).
+        """
+        if const_index is True:
+            read_array_map = self.const_index_read_array_map
+            read_array_op_map = self.const_index_read_array_op_map
+        else:
+            read_array_map = self.read_array_map
+            read_array_op_map = self.read_array_op_map
+
+        read_array_map[offset] = size
+        if op is None:
+            return
+        if read_array_op_map.get(offset) is None:
+            read_array_op_map[offset] = []
+        read_array_op_map[offset].append(op)
 
     def get_or_add_ptr_at(self, offset, vn=None):
         """
@@ -235,4 +254,10 @@ class MemHandle:
 
     def __repr__(self):
         return self.resolve_repr()
+
+    def get_load_ops(self):
+        return sum([i for i in self.read_op_map.values()], [])
+
+    def get_store_ops(self):
+        return sum([i for i in self.write_op_map.values()], [])
 

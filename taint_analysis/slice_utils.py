@@ -99,7 +99,7 @@ class CompositeFieldAccessDescriptor:
         new_cfad.mem_handle = self.mem_handle
 
 
-def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
+def trace_composite_access_forward(vn):
     """
     Trace forward from the varnode to all of the accesses.
     a lot of the code here is directly from FillOutStructureCmd.java,
@@ -187,7 +187,7 @@ def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
 
             if opcode == PcodeOpAST.PTRADD:
                 # PTRADD is for array indexing
-                log.error("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
+                log.debug("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
                 dt = None
                 composite_vn = inputs[0]
                 high_composite_vn = composite_vn.high
@@ -210,10 +210,12 @@ def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
                                                     vn=inputs[1])
                         cfad.add_access(access)
                         # componentMap.setMinimumSize(newOff)
-                        # FIXME: is mem_handle access here correct?
-                        # if ptr_loads_are_reads is True:
-                        #     current_ref.mem_handle.add_read_at(newOff,
-                        #                                        output.size, op=desc_op)
+                        current_ref.mem_handle.add_array_read_at(newOff,
+                                                                 inputs[2].size,
+                                                                 op=desc_op,
+                                                                 const_index=True)
+                        # no real mem_handle read here because this op is just
+                        # calculating the address of a future read or write
                     else:
                         log.error("sanity check failed for %s" % str(desc_op))
                     continue
@@ -226,11 +228,9 @@ def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
                 access = VarNodePCodeAccess(newOff,
                                             datatype=dt, vn=offset_vn)
                 cfad.add_access(access)
-                # FIXME: is mem_handle access here correct?
-                # if ptr_loads_are_reads is True:
-                #     current_ref.mem_handle.add_read_at(newOff,
-                #                                        output.size, op=desc_op)
-
+                current_ref.mem_handle.add_array_read_at(newOff, inputs[2].size, op=desc_op)
+                # no real mem_handle read here because this op is just
+                # calculating the address of a future read or write
                 offset_mem_handle = current_ref.mem_handle.new_ref_to_offset(newOff, output)
                 putOnList(output, 0, todoList, doneList,
                           offset_mem_handle)
@@ -238,7 +238,7 @@ def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
 
             if opcode == PcodeOpAST.PTRSUB:
                 # PTRSUB is for struct/union accesses
-                log.error("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
+                log.debug("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
                 dt = None
                 composite_vn = inputs[0]
                 high_composite_vn = composite_vn.high
@@ -265,12 +265,8 @@ def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
                                                 datatype=dt,
                                                 vn=inputs[1])
                     cfad.add_access(access)
-                    # FIXME: is mem_handle access here correct?
-                    # likely no, mem_handle read here is not a good assumption
-                    # if ptr_loads_are_reads is True:
-                    #     current_ref.mem_handle.add_read_at(subOff,
-                    #                                        output.size,
-                    #                                        op=desc_op)
+                    # no real mem_handle read here because this op is just
+                    # calculating the address of a future read or write
                 else:
                     log.error("sanityCheck failed for %s" % str(desc_op))
                 continue
@@ -287,7 +283,7 @@ def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
                 continue
 
             if opcode == PcodeOpAST.LOAD:
-                log.error("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
+                log.debug("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
                 # want a mem handle that is at offset
                 # current_ref.offset from the current handle,
                 outDt = FillOutStructureCmd.getDataTypeTraceForward(output)
@@ -304,16 +300,16 @@ def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
                     current_ref.mem_handle.add_read_at(current_ref.offset, outDt.length, op=desc_op)
                     continue
 
-                # if ptr_loads_are_reads is True:
                 current_ref.mem_handle.add_read_at(current_ref.offset,
                                                    output.size, op=desc_op)
 
+                # A LOAD should be the only reason a truely new MemHandle is
+                # created, all of the others should be child handles
+                # TODO: something seems a little bit off with the new handle
+                # TODO: creation here, it seems like the logic for determining
+                # TODO: if this varnode can truely be treated as a pointer
+                # TODO: could be improved
                 maybe_new_mem_handle = current_ref.mem_handle.get_or_add_ptr_at(current_ref.offset, output)
-                # FIXME: This read might be erronious. it seems like doing it on
-                # FIXME: this LOAD would be adding the read at least one op too
-                # FIXME: early
-                # maybe_new_mem_handle.add_read_at(0,
-                #                                  output.size, op=desc_op)
                 # unlike a STORE op, a LOAD op could be a dereference
                 # in a chain of pointers, so try to continue processing
                 # to try to resolve the full chain
@@ -328,11 +324,12 @@ def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
                 continue
 
             if opcode == PcodeOpAST.STORE:
-                log.error("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
+                log.debug("%s %s" % (str(current_ref.mem_handle), str(desc_op)))
                 # we only care about this store op if the pointer is
                 # related to the current struct/slice, not the value
                 # being written
                 if desc_op.getSlot(current_ref.varnode) != 1:
+                    log.error("related STORE to different pointer %s" % (str(desc_op)))
                     continue
 
                 outDt = FillOutStructureCmd.getDataTypeTraceBackward(inputs[2])
@@ -372,17 +369,12 @@ def trace_composite_access_forward(vn, ptr_loads_are_reads=False):
                 continue
 
             if opcode == PcodeOpAST.CALL:
-                # If pointer is passed directly (no offset)
-                # find it as an input
-                # TODO: maybe add mem_handle read here for params if
-                # TODO: a load isn't used right before this
-                if current_ref.offset == 0:
-                    slot = desc_op.getSlot(current_ref.varnode)
-                    if slot > 0 and slot < desc_op.getNumInputs():
-                        pass
-                else:
-                    pass
-
+                # If pointer is passed find it as an input
+                slot = desc_op.getSlot(current_ref.varnode)
+                if slot > 0 and slot < desc_op.getNumInputs():
+                    current_ref.mem_handle.add_read_at(current_ref.offset,
+                                                       desc_op.getInput(slot).size,
+                                                       op=desc_op)
                 continue
             if opcode == PcodeOpAST.CALLIND:
                 # TODO: maybe add mem_handle read here for params if
