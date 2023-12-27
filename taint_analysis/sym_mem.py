@@ -13,17 +13,25 @@ class MemHandleFactory:
 class MemHandle:
     ANCHOR_TO_HANDLE_MAP = {}
 
-    def __init__(self, ptr_size=4, varnode=None, offset=0):
-        self._ptr_map = KeyAdjustedOffsetMapping(offset)  # offset to MemHandle inst
+    def __init__(self, ptr_size=4, varnode=None, parent=None, offset=0):
+        self._base_offset = offset
         self._ptr_size = ptr_size
-        self._read_map = KeyAdjustedOffsetMapping(offset)  # offset to size
-        self._write_map = KeyAdjustedOffsetMapping(offset)  # offset to size
+        self.parent = parent
         self._read_mask = bytearray(b'')
         self._write_mask = bytearray(b'')
         self.vn_anchors = []
         self.vn_anchor_set = set()
         self._curr_min_size = 0
         self._needs_size_calc = True
+        if parent is None:
+            self._ptr_map = KeyAdjustedOffsetMapping(offset)  # offset to MemHandle inst
+            self._read_map = KeyAdjustedOffsetMapping(offset)  # offset to size
+            self._write_map = KeyAdjustedOffsetMapping(offset)  # offset to size
+        else:
+            self._ptr_map = self.parent._ptr_map.new_child(offset)  # offset to MemHandle inst
+            self._read_map = self.parent._read_map.new_child(offset)  # offset to size
+            self._write_map = self.parent._write_map.new_child(offset)  # offset to size
+
         if varnode is not None:
             self.add_vn_anchor(varnode)
 
@@ -154,4 +162,18 @@ class MemHandle:
         repr_str = "MemHandle(%s %s, min_size=%d)" % (str(dt), str(name), min_size)
         return repr_str
 
+    def new_ref_to_offset(self, offset, vn=None):
+        """
+        Creates a new MemHandle instance with a unique relationship to the
+        MemHandle instance whose `new_ref_to_offset` created it.
+        Any reads, writes, or ptrs that are added to the new instance will
+        have the additions reflected on all ancestors of the MemHandle
+        instance, with an appropriate adjustment made to the offset of each
+        addition.
+        This is meant to make passing a reference to an embedded struct or
+        buffer reasonable to work with
+        """
+        new_mem_handle = MemHandle(self._ptr_size, varnode=vn,
+                                   parent=self, offset=offset)
+        return new_mem_handle
 
