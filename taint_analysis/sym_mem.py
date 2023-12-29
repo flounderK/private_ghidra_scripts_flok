@@ -1,4 +1,5 @@
 
+from ghidra.program.model.pcode import PcodeOpAST
 from .key_adjusted_offset_mapping import KeyAdjustedOffsetMapping
 import logging
 from __main__ import *
@@ -6,13 +7,6 @@ from __main__ import *
 log = logging.getLogger(__file__)
 log.addHandler(logging.StreamHandler())
 log.setLevel(logging.INFO)
-
-
-class MemHandleFactory:
-    def __init__(self, program=None):
-        if program is None:
-            program = currentProgram
-        self.program = program
 
 
 class MemHandle:
@@ -256,8 +250,8 @@ class MemHandle:
         return self.resolve_repr()
 
     def get_load_ops(self):
-        return sum([i for i in self.read_op_map.values()], [])
+        return [i for i in sum([i for i in self.read_op_map.values()], []) if i.opcode == PcodeOpAST.LOAD]
 
     def get_store_ops(self):
-        return sum([i for i in self.write_op_map.values()], [])
+        return [i for i in sum([i for i in self.write_op_map.values()], []) if i.opcode == PcodeOpAST.STORE]
 
