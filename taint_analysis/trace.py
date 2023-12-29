@@ -105,41 +105,6 @@ class TraceState:
 PointerRef = namedtuple("PointerRef", ["varnode", "offset", "mem_handle"])
 
 
-def putOnList(output, offset, todoList, doneList, mem_handle):
-    """
-    Add a Varnode reference to the current work list to facilitate flow tracing.
-    To prevent cycles, a separate of visited Varnodes is maintained
-    @param output is the Varnode at the current point of flow
-    @param offset is the relative offset of the Varnode to the root variable
-    @param todoList is the current work list
-    @param doneList is the visited list
-    """
-    if output in doneList:
-        return
-    todoList.append(PointerRef(output, offset, mem_handle))
-    doneList.add(output)
-    return
-
-
-def sanityCheck(offset, existingSize=0):
-    """
-    Check to determine whether or not an INT_(ADD|SUB) or PTR(ADD|SUB)
-    offset is considered valid
-    """
-    # offsets shouldn't be negative
-    if offset < 0:
-        log.error("Negative offset in sanityCheck")
-        return False
-    # do we have room in the structure
-    # if offset < existingSize:
-    #     return True
-    # bigger than existing size; arbitrary cut-off to
-    # prevent huge structures
-    if offset > 0x1000:
-        return False
-    return True
-
-
 class ForwardSliceVisitor(PCodeVisitor):
     """
     A class for creating forward slices. It works like
@@ -335,11 +300,11 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
         output = op.getOutput()
         inputs = list(op.getInputs())
 
-        pass
-
-    def visit_RETURN(self, current_ref, op):
-        # TODO: handle RETURN
-        pass
+        slot = op.getSlot(current_ref.varnode)
+        if slot > 0 and slot < op.getNumInputs():
+            current_ref.mem_handle.add_read_at(current_ref.offset,
+                                               op.getInput(slot).size,
+                                               op=op)
 
     # INT op handlers
     def visit_INT_ADD(self, current_ref, op):
