@@ -203,11 +203,11 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
     """
 
     PointerRef = namedtuple("PointerRef", ["varnode", "offset", "mem_handle"])
-    def __init__(self, **kwargs):
+    def __init__(self, mem_handle=None, **kwargs):
         super(CompositeTrackForwardSliceVisitor, self).__init__(**kwargs)
         self.address_to_call_input_map = {}
         self.vn_to_ptr_ref_map = {}
-        self.start_mem_handle = None
+        self.start_mem_handle = mem_handle
 
     def putOnList(self, ptr_ref):
         if super(CompositeTrackForwardSliceVisitor, self).putOnList(ptr_ref):
@@ -235,7 +235,8 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
         """
         add the initial PointerRef to the todoList
         """
-        self.start_mem_handle = MemHandle(PTR_SIZE, vn)
+        if self.start_mem_handle is None:
+            self.start_mem_handle = MemHandle(PTR_SIZE, vn)
         self.putOnList(self.PointerRef(vn, 0, self.start_mem_handle))
 
     # deref and pure mov ops
