@@ -85,12 +85,16 @@ class TraceArgs:
     Object to help with consistently tracking values passed to functions
     called while tracing
     """
-    def __init__(self):
+    def __init__(self, address=None):
         self.args = {}
-        self.address = None
+        self.address = address
 
     def add_arg(self, arg, slot):
         self.args[slot] = arg
+
+    def __repr__(self):
+        param_repr = ",".join(["param_%d=%s" % (k, str(v)) for k, v in self.args.items()])
+        return "TraceArgs(addr=%s, %s)" % (str(self.address), param_repr)
 
 
 class TraceState:
@@ -307,6 +311,13 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
             current_ref.mem_handle.add_read_at(current_ref.offset,
                                                op.getInput(slot).size,
                                                op=op)
+            addr = op.getSeqnum().getTarget()
+            if addr is not None:
+                maybe_trace_args = self.address_to_call_input_map.get(addr)
+                if maybe_trace_args is None:
+                    maybe_trace_args = TraceArgs(addr)
+                    self.address_to_call_input_map[addr] = maybe_trace_args
+                maybe_trace_args.add_arg(current_ref, slot)
 
     def visit_CALLIND(self, current_ref, op):
         output = op.getOutput()
@@ -317,6 +328,13 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
             current_ref.mem_handle.add_read_at(current_ref.offset,
                                                op.getInput(slot).size,
                                                op=op)
+            addr = op.getSeqnum().getTarget()
+            if addr is not None:
+                maybe_trace_args = self.address_to_call_input_map.get(addr)
+                if maybe_trace_args is None:
+                    maybe_trace_args = TraceArgs(addr)
+                    self.address_to_call_input_map[addr] = maybe_trace_args
+                maybe_trace_args.add_arg(current_ref, slot)
 
     # INT op handlers
     def visit_INT_ADD(self, current_ref, op):
