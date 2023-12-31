@@ -116,9 +116,10 @@ class ForwardSliceVisitor(PCodeVisitor):
     def __init__(self):
         self.todoList = []
         self.doneList = set()
-        self.visited_ops = set()
-        self.visited_varnodes = set()
 
+    def clear_lists(self):
+        self.todoList = []
+        self.doneList = set()
 
     def putOnList(self, pointer_ref):
         """
@@ -127,10 +128,10 @@ class ForwardSliceVisitor(PCodeVisitor):
         @param pointer_ref: a class with a `varnode` attribute
         """
         if pointer_ref.varnode in self.doneList:
-            return
+            return False
         self.todoList.append(pointer_ref)
         self.doneList.add(pointer_ref.varnode)
-        return
+        return True
 
     def trace(self, vn):
         """
@@ -139,18 +140,23 @@ class ForwardSliceVisitor(PCodeVisitor):
         as that command performs most of the algoritm that we want, it just
         doesn't try to enumerate dereferenced pointers or track reads/writes
         """
+        self.clear_lists()
+        visited_ops = set()
+        visited_varnodes = set()
         self.init_todoList(vn)
         while self.todoList:
             current_ref = self.todoList.pop()
             if current_ref.varnode == None:
                 continue
-            self.visited_varnodes.add(current_ref.varnode)
+            visited_varnodes.add(current_ref.varnode)
             self.pre_handle(current_ref)
             descendant_ops = current_ref.varnode.getDescendants()
             for desc_op in descendant_ops:
                 self.visit(current_ref, desc_op)
-                self.visited_ops.add(desc_op)
+                visited_ops.add(desc_op)
             self.post_op_handle(current_ref)
+
+        return visited_ops, visited_varnodes
 
     def pre_handle(self, current_ref):
         """
@@ -195,7 +201,13 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
     PointerRef = namedtuple("PointerRef", ["varnode", "offset", "mem_handle"])
     def __init__(self, **kwargs):
         super(CompositeTrackForwardSliceVisitor, self).__init__(**kwargs)
+        self.address_to_call_input_map = {}
+        self.vn_to_ptr_ref_map = {}
         self.start_mem_handle = None
+
+    def putOnList(self, ptr_ref):
+        if super(CompositeTrackForwardSliceVisitor, self).putOnList(ptr_ref):
+            self.vn_to_ptr_ref_map[ptr_ref.varnode] = ptr_ref
 
     def sanityCheck(self, offset, existingSize=0):
         """
@@ -444,6 +456,94 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
         # inputs = list(op.getInputs())
 
         pass
+
+
+class TaintTrackForwardSliceVisitor(ForwardSliceVisitor):
+    def __init__(self, **kwargs):
+        super(TaintTrackForwardSliceVisitor, self).__init__(**kwargs)
+        self.tainted_call_args = defaultdict(list)
+        self.tainted_varnodes_by_func_name = defaultdict(set)
+
+
+class BackwardSliceVisitor(PCodeVisitor):
+    """
+    A class for creating backward slices. It works like
+    DecompilerUtils.getBackwardSlice, except it is extensible with python
+    classes and allows child classes to define their own handlers for
+    any given op or unhandled ops with `visit_GENERIC`
+    """
+    PointerRef = namedtuple("PointerRef", ["varnode"])
+    def __init__(self):
+        self.todoList = []
+        self.doneList = set()
+
+    def clear_lists(self):
+        self.todoList = []
+        self.doneList = set()
+
+    def putOnList(self, pointer_ref):
+        """
+        Add a Varnode reference to the current work list to facilitate flow tracing.
+        To prevent cycles, a separate of visited Varnodes is maintained
+        @param pointer_ref: a class with a `varnode` attribute
+        """
+        if pointer_ref.varnode in self.doneList:
+            return False
+        self.todoList.append(pointer_ref)
+        self.doneList.add(pointer_ref.varnode)
+        return True
+
+    def trace(self, vn):
+        """
+        Trace backward from the varnode to find all of the defining ops
+        """
+        self.clear_lists()
+        visited_ops = set()
+        visited_varnodes = set()
+        self.init_todoList(vn)
+        while self.todoList:
+            current_ref = self.todoList.pop()
+            if current_ref.varnode == None:
+                continue
+            visited_varnodes.add(current_ref.varnode)
+            self.pre_handle(current_ref)
+            defining_op = current_ref.varnode.getDef()
+            if defining_op is None:
+                continue
+            self.visit(current_ref, defining_op)
+            visited_ops.add(defining_op)
+            self.post_op_handle(current_ref)
+
+        return visited_ops, visited_varnodes
+
+    def pre_handle(self, current_ref):
+        """
+        handler before iterating descendants
+        """
+        pass
+
+    def init_todoList(self, vn):
+        """
+        add the initial PointerRef to the todoList
+        """
+        ptr_ref = self.PointerRef(vn)
+        self.putOnList(ptr_ref)
+
+    def post_op_handle(self, current_ref):
+        pass
+
+    def visit_CALL(self, current_ref, op):
+        return
+
+    def visit_CALLIND(self, current_ref, op):
+        return
+
+    def visit_GENERIC(self, current_ref, op):
+        for inp_vn in op.getInputs():
+            if inp_vn is None:
+                continue
+            ptr_ref = self.PointerRef(inp_vn)
+            self.putOnList(ptr_ref)
 
 
 def trace_composite_access_backward(vn):
