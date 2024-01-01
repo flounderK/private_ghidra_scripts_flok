@@ -80,21 +80,49 @@ class CompositeFieldAccessDescriptor:
         new_cfad.mem_handle = self.mem_handle
 
 
-class TraceArgs:
+class TraceArgs(object):
+    ALL_ARGS_MAP = {}
     """
     Object to help with consistently tracking values passed to functions
     called while tracing
     """
-    def __init__(self, address=None):
+    def __init__(self, address=None, called_func=None):
         self.args = {}
         self.address = address
+        self.called_func = called_func
 
     def add_arg(self, arg, slot):
         self.args[slot] = arg
 
     def __repr__(self):
-        param_repr = ",".join(["param_%d=%s" % (k, str(v)) for k, v in self.args.items()])
-        return "TraceArgs(addr=%s, %s)" % (str(self.address), param_repr)
+        # param_repr = ",".join(["param_%d=%s" % (k, str(v)) for k, v in self.args.items()])
+        param_repr = "params=%d" % len(self.args)
+        call_to = ""
+        if self.called_func is not None:
+            call_to = " -> %s" % self.called_func.getName()
+        return "TraceArgs(addr=%s%s, %s)" % (str(self.address), call_to, param_repr)
+
+
+def get_or_create_traceargs_from_op(op, classtype=TraceArgs):
+    if op.opcode not in [PcodeOpAST.CALL, PcodeOpAST.CALLIND]:
+        return None
+    call_addr = op.getSeqnum().getTarget()
+
+    maybe_trace_args = classtype.ALL_ARGS_MAP.get(call_addr)
+    if maybe_trace_args is not None:
+        return maybe_trace_args
+    # need to make a new one
+    called_func = None
+    if op.opcode == PcodeOpAST.CALL:
+        called_func_addr = toAddr(op.getInput(0).getOffset())
+        if called_func_addr is not None:
+            called_func = getFunctionAt(called_func_addr)
+
+    new_trace_args = classtype(call_addr, called_func)
+    classtype.ALL_ARGS_MAP[call_addr] = new_trace_args
+
+    return new_trace_args
+
 
 
 class TraceState:
@@ -313,12 +341,14 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
                                                op.getInput(slot).size,
                                                op=op)
             addr = op.getSeqnum().getTarget()
-            if addr is not None:
-                maybe_trace_args = self.address_to_call_input_map.get(addr)
-                if maybe_trace_args is None:
-                    maybe_trace_args = TraceArgs(addr)
-                    self.address_to_call_input_map[addr] = maybe_trace_args
-                maybe_trace_args.add_arg(current_ref, slot)
+            if addr is None:
+                return
+            maybe_trace_args = self.address_to_call_input_map.get(addr)
+            if maybe_trace_args is None:
+                # NOTE: This might not belong here
+                maybe_trace_args = get_or_create_traceargs_from_op(op)
+                self.address_to_call_input_map[addr] = maybe_trace_args
+            maybe_trace_args.add_arg(current_ref, slot)
 
     def visit_CALLIND(self, current_ref, op):
         output = op.getOutput()
@@ -330,12 +360,13 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
                                                op.getInput(slot).size,
                                                op=op)
             addr = op.getSeqnum().getTarget()
-            if addr is not None:
-                maybe_trace_args = self.address_to_call_input_map.get(addr)
-                if maybe_trace_args is None:
-                    maybe_trace_args = TraceArgs(addr)
-                    self.address_to_call_input_map[addr] = maybe_trace_args
-                maybe_trace_args.add_arg(current_ref, slot)
+            if addr is None:
+                return
+            maybe_trace_args = self.address_to_call_input_map.get(addr)
+            if maybe_trace_args is None:
+                maybe_trace_args = get_or_create_traceargs_from_op(op)
+                self.address_to_call_input_map[addr] = maybe_trace_args
+            maybe_trace_args.add_arg(current_ref, slot)
 
     # INT op handlers
     def visit_INT_ADD(self, current_ref, op):

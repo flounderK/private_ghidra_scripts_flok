@@ -1,4 +1,5 @@
 import string
+from __main__ import *
 
 
 def batch(it, sz):
@@ -48,3 +49,27 @@ def hexdump_str(bytevals, offset=0, bytes_per_line=16, bytegroupsize=2):
         outlines.append(out_line)
 
     return '\n'.join(outlines)
+
+
+def get_functions_called_by(func):
+    """
+    Get all of the functions that are called by @func
+    """
+    processed = set()
+    to_process = [func]
+    while to_process:
+        curr = to_process.pop()
+        if curr is None:
+            continue
+        for i in curr.getCalledFunctions(monitor):
+            if i is None:
+                continue
+            if i in processed:
+                continue
+            if i in to_process:
+                continue
+            if i == curr:
+                continue
+            to_process.append(i)
+        processed.add(curr)
+    return processed
