@@ -312,7 +312,7 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
         # we only care about this store op if the pointer is
         # related to the current struct/slice, not the value
         # being written
-        if op.getSlot(current_ref.varnode) != 1:
+        if inputs.index(current_ref.varnode) != 1:
             log.error("related STORE to different pointer %s" % (str(op)))
             return
 
@@ -335,7 +335,7 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
         inputs = list(op.getInputs())
 
         # If pointer is passed find it as an input
-        slot = op.getSlot(current_ref.varnode)
+        slot = inputs.index(current_ref.varnode)
         if slot > 0 and slot < op.getNumInputs():
             current_ref.mem_handle.add_read_at(current_ref.offset,
                                                op.getInput(slot).size,
@@ -354,7 +354,7 @@ class CompositeTrackForwardSliceVisitor(ForwardSliceVisitor):
         output = op.getOutput()
         inputs = list(op.getInputs())
 
-        slot = op.getSlot(current_ref.varnode)
+        slot = inputs.index(current_ref.varnode)
         if slot > 0 and slot < op.getNumInputs():
             current_ref.mem_handle.add_read_at(current_ref.offset,
                                                op.getInput(slot).size,

@@ -127,10 +127,10 @@ class SliceUtils:
         @varnodes: list of Varnodes
         returns a list of indices and varnodes [(index, Varnode)]
         """
-        inp_list = op.getInputs()
+        inp_list = list(op.getInputs())
         inp_set = set(inp_list)
         intersecting = inp_set.intersection(varnodes)
-        varnodes_and_inds = [(inp_list.getSlot(i), i) for i in intersecting]
+        varnodes_and_inds = [(inp_list.index(i), i) for i in intersecting]
         return varnodes_and_inds
 
     def resolve_ptr_access(self, op, vn):
